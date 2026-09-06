@@ -1,0 +1,25 @@
+# Fly.io app config. Rename `app` to a globally-unique name before deploying
+# (`fly launch` will offer to do this for you), and set `primary_region` to
+# whatever's closest to you (see `fly platform regions`).
+app = "pagegrab-server"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  # 0 = the machine (and the live browser session) sleeps between uses to
+  # save cost, waking on the next request in a few seconds. Set to 1 to
+  # keep it always warm instead (higher cost, no cold-start delay).
+  min_machines_running = 0
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

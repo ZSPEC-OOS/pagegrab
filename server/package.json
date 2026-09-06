@@ -1,0 +1,18 @@
+{
+  "name": "pagegrab-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Persistent headless-browser backend for PageGrab: streams a live view over WebSocket, forwards clicks, and captures full-page PNGs on demand.",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "puppeteer": "^25.10.0",
+    "ws": "^8.21.3"
+  }
+}

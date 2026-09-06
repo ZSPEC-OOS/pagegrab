@@ -1,28 +1,115 @@
 # PageGrab
 
-A tiny Electron desktop app: browse to any site in-app, then capture the
-**entire page** — including everything below the fold that would normally
-require scrolling — as a single PNG.
+Two ways to capture a **full page** (the entire scrollable height, not just
+what's visible) as a PNG:
 
-## How it works
+1. **Desktop app** (`/` — Electron) — browse in a window, click Capture.
+2. **Web app** (`/web` + `/server`) — a Vercel-hosted page showing a *live*
+   view of a browser running on a small backend server; click into it to
+   navigate/interact, then capture.
 
-The browsing pane is a `<webview>`. Clicking **Capture Full Page** attaches
-the Chrome DevTools Protocol to that page, reads its full content size
-(`Page.getLayoutMetrics`), and calls `Page.captureScreenshot` with
-`captureBeyondViewport: true` clipped to the full page height. Chrome renders
-and stitches the whole page in one shot — no manual scroll-and-crop needed.
-This is the same technique Puppeteer uses for `page.screenshot({ fullPage: true })`.
+Both use the same underlying technique: the Chrome DevTools Protocol's
+`Page.captureScreenshot` with `captureBeyondViewport: true`, clipped to the
+page's full content size (`Page.getLayoutMetrics`) — the same approach
+Puppeteer uses for `page.screenshot({ fullPage: true })`.
 
-## Run it
+## Why the web version needs two parts
+
+A live, clickable browser session is a *persistent, stateful* process — it
+has to stay running and connected between your clicks. Vercel's normal
+serverless functions are short-lived request/response handlers, not built to
+hold that kind of session open. So:
+
+- **`/web`** is a static-ish Next.js page → deploys to **Vercel** as usual.
+- **`/server`** is a small always-on Node process (headless Chromium +
+  WebSocket) → deploys to a host built for long-running processes, e.g.
+  **Fly.io**. The web page connects to it over WebSocket.
+
+Nothing is stored server-side: each capture streams straight from the
+backend to your browser, which saves it via a normal file download — same
+as clicking a download link.
+
+---
+
+## 1. Desktop app (Electron)
 
 ```bash
 npm install
 npm start
 ```
 
-## Use it
+Opens a window with an address bar and a **Capture Full Page** button. See
+inline comments in `main.js` for how the capture works.
 
-1. Type a URL in the address bar and press Enter (or click **Go**).
-2. Browse normally — back/forward/reload work like a regular browser.
-3. Click **Capture Full Page**.
-4. Pick where to save the `.png` in the dialog that appears.
+---
+
+## 2. Web app (Vercel + Fly.io)
+
+### Deploy the backend (`/server`) to Fly.io
+
+Requires the [`flyctl` CLI](https://fly.io/docs/flyctl/install/), installed
+and logged in on your machine (this is the one place a local install is
+unavoidable — Fly.io needs it to build and push the container image).
+
+```bash
+cd server
+fly launch --no-deploy   # creates the app, rename it when prompted
+fly secrets set PAGEGRAB_TOKEN=$(openssl rand -hex 24)
+fly deploy
+```
+
+Save the token `fly secrets set` generated above — it's what the web page
+uses to authenticate. Note the app's hostname (`fly status` or the deploy
+output), e.g. `pagegrab-server.fly.dev`; the web page will connect to
+`wss://pagegrab-server.fly.dev`.
+
+### Deploy the frontend (`/web`) to Vercel
+
+No local install needed for this part:
+
+1. Push this repo to GitHub (already done if you're reading this from the
+   repo).
+2. On [vercel.com](https://vercel.com): **Add New Project** → **Import Git
+   Repository** → select this repo.
+3. Set **Root Directory** to `web` in the import settings.
+4. Deploy. Vercel builds it in the cloud.
+
+### Using it
+
+1. Open the deployed Vercel URL.
+2. Enter the backend URL (`wss://your-app.fly.dev`) and the token from
+   `fly secrets set` above. These are remembered in the browser's
+   `localStorage` for next time.
+3. Click **Connect** — you'll see a live view of the remote browser.
+4. Type a URL in the address bar, click into the view to interact with the
+   page (clicks are forwarded to the real browser).
+5. Click **Capture Full Page** — the PNG downloads to your machine.
+
+### Local development
+
+```bash
+cd server && npm install && PAGEGRAB_TOKEN=devtoken npm start
+cd web && npm install && npm run dev
+```
+
+Then connect the web app to `ws://localhost:8080` with token `devtoken`.
+
+### Security note
+
+The backend will navigate to, and screenshot, whatever URL it's told to, on
+a session gated only by the token — treat that token like a password. Don't
+commit it, and rotate it (`fly secrets set PAGEGRAB_TOKEN=...`) if it leaks.
+
+### Fly.io idling
+
+`fly.toml` sets `min_machines_running = 0`, so the backend (and its live
+browser session) sleeps between uses to save cost, waking on the next
+connection within a few seconds. Set it to `1` for an always-warm instance
+with no wake delay, at higher cost.
+
+## Roadmap
+
+- **Autoclick macro**: a timed loop that captures, clicks a saved
+  coordinate, captures again, and repeats — not yet built. The WebSocket
+  protocol (`server/index.js`) is set up to add this as a new message type
+  (e.g. `autoclick-start` / `autoclick-stop`) without restructuring anything.
