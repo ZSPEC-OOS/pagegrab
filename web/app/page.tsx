@@ -42,6 +42,7 @@ export default function Page() {
   const [connecting, setConnecting] = useState(false);
   const [addressValue, setAddressValue] = useState('');
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
+  const [navigating, setNavigating] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [status, setStatus] = useState('');
 
@@ -85,6 +86,8 @@ export default function Page() {
           break;
         case 'navigated':
           setAddressValue(msg.url);
+          setNavigating(false);
+          setStatus(`Loaded ${msg.url}`);
           break;
         case 'capture':
           downloadPng(msg.data);
@@ -93,6 +96,7 @@ export default function Page() {
           break;
         case 'error':
           setStatus(`Error: ${msg.message}`);
+          setNavigating(false);
           setCapturing(false);
           break;
       }
@@ -119,7 +123,10 @@ export default function Page() {
 
   const navigate = () => {
     const url = normalizeUrl(addressValue);
-    if (url) wsRef.current?.send(JSON.stringify({ type: 'navigate', url }));
+    if (!url || !wsRef.current) return;
+    setNavigating(true);
+    setStatus(`Navigating to ${url}…`);
+    wsRef.current.send(JSON.stringify({ type: 'navigate', url }));
   };
 
   const capture = () => {
@@ -205,13 +212,24 @@ export default function Page() {
           value={addressValue}
           onChange={(e) => setAddressValue(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && navigate()}
+          disabled={navigating}
         />
-        <button onClick={navigate}>Go</button>
+        <button onClick={navigate} disabled={navigating}>
+          {navigating ? 'Loading…' : 'Go'}
+        </button>
         <button onClick={capture} disabled={capturing}>
           {capturing ? 'Capturing…' : 'Capture Full Page'}
         </button>
       </div>
-      <div style={{ padding: '4px 10px', fontSize: 12, color: '#b5b8bd', background: '#2b2d31', minHeight: 16 }}>
+      <div
+        style={{
+          padding: '4px 10px',
+          fontSize: 12,
+          color: status.startsWith('Error') ? '#ff6b6b' : '#b5b8bd',
+          background: '#2b2d31',
+          minHeight: 16,
+        }}
+      >
         {status}
       </div>
       <div style={{ flex: 1, background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>

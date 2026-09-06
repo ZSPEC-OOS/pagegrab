@@ -93,7 +93,13 @@ wss.on('connection', (ws) => {
             break;
           }
           await ensureBrowser();
-          await page.goto(msg.url, { waitUntil: 'load', timeout: 30000 });
+          // 'load' waits for every subresource (ads, analytics, slow
+          // third-party scripts) to finish, which on real sites can hang
+          // well past a reasonable wait, or never resolve at all.
+          // 'domcontentloaded' fires as soon as the page's own HTML is
+          // parsed, which is what "the page is up, let me look at it"
+          // actually needs.
+          await page.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
           send({ type: 'navigated', url: page.url() });
           break;
         }
