@@ -107,7 +107,12 @@ wss.on('connection', (ws) => {
               cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => {});
             };
             cdp.on('Page.screencastFrame', frameHandler);
-            await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 60 });
+            await cdp.send('Page.startScreencast', {
+              format: 'jpeg',
+              quality: 80,
+              maxWidth: VIEWPORT.width,
+              maxHeight: VIEWPORT.height,
+            });
           }
           break;
         }
@@ -128,6 +133,31 @@ wss.on('connection', (ws) => {
             button: 'left',
             clickCount: 1,
           });
+          break;
+        }
+
+        case 'wheel': {
+          if (!page) break;
+          await page.mouse.wheel({ deltaX: msg.deltaX, deltaY: msg.deltaY });
+          break;
+        }
+
+        case 'key': {
+          if (!page) break;
+          // Single printable characters get typed; everything else (Enter,
+          // Backspace, Tab, arrows, Escape, ...) is treated as a named key.
+          // Puppeteer's KeyInput names line up with KeyboardEvent.key for
+          // these, so the client can forward `event.key` as-is.
+          try {
+            if (msg.key.length === 1) {
+              await page.keyboard.type(msg.key);
+            } else {
+              await page.keyboard.press(msg.key);
+            }
+          } catch {
+            // Unrecognized key name (e.g. a bare modifier) - ignore it
+            // rather than dropping the connection over a keystroke.
+          }
           break;
         }
 

@@ -77,7 +77,7 @@ export default function Page() {
         case 'authed':
           setConnected(true);
           setConnecting(false);
-          setStatus('Connected.');
+          setStatus('Connected. Click the live view to focus it, then scroll/type as usual.');
           ws.send(JSON.stringify({ type: 'start-view' }));
           break;
         case 'frame':
@@ -131,11 +131,36 @@ export default function Page() {
   const handleImageClick = (e: React.MouseEvent<HTMLImageElement>) => {
     const img = imgRef.current;
     if (!img || !wsRef.current) return;
+    img.focus();
     const rect = img.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * VIEWPORT_WIDTH;
     const y = ((e.clientY - rect.top) / rect.height) * VIEWPORT_HEIGHT;
     wsRef.current.send(JSON.stringify({ type: 'click', x, y }));
   };
+
+  // Keys with no character of their own (bare modifiers) aren't useful to
+  // forward on their own - Puppeteer's press() would just tap them alone.
+  const BARE_MODIFIERS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'CapsLock']);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLImageElement>) => {
+    if (!wsRef.current || BARE_MODIFIERS.has(e.key)) return;
+    e.preventDefault();
+    wsRef.current.send(JSON.stringify({ type: 'key', key: e.key }));
+  };
+
+  // React's onWheel is passive, so preventDefault() there is a no-op; a
+  // manually-attached listener is needed to stop the page itself from
+  // scrolling/rubber-banding while a wheel gesture drives the remote page.
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      wsRef.current?.send(JSON.stringify({ type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY }));
+    };
+    img.addEventListener('wheel', onWheel, { passive: false });
+    return () => img.removeEventListener('wheel', onWheel);
+  }, [frameSrc === null]);
 
   if (!connected) {
     return (
@@ -196,8 +221,10 @@ export default function Page() {
             ref={imgRef}
             src={frameSrc}
             alt="Live view"
+            tabIndex={0}
             onClick={handleImageClick}
-            style={{ maxWidth: '100%', maxHeight: '100%', cursor: 'pointer' }}
+            onKeyDown={handleKeyDown}
+            style={{ maxWidth: '100%', maxHeight: '100%', cursor: 'pointer', outline: 'none' }}
           />
         ) : (
           <div style={{ color: '#666' }}>Waiting for the live view…</div>

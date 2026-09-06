@@ -6,7 +6,8 @@ what's visible) as a PNG:
 1. **Desktop app** (`/` — Electron) — browse in a window, click Capture.
 2. **Web app** (`/web` + `/server`) — a Vercel-hosted page showing a *live*
    view of a browser running on a small backend server; click into it to
-   navigate/interact, then capture.
+   focus it, then click, scroll, and type as usual to navigate/interact,
+   then capture.
 
 Both use the same underlying technique: the Chrome DevTools Protocol's
 `Page.captureScreenshot` with `captureBeyondViewport: true`, clipped to the
