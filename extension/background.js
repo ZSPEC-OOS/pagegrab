@@ -3,89 +3,70 @@
 // these and re-runs them inside the target page. ---
 
 function pagegrabPrepare() {
-  function isVisible(el) {
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  }
-
-  function findScrollContainer() {
-    const doc = document.scrollingElement || document.documentElement;
-    if (doc.scrollHeight - doc.clientHeight > 10) {
-      return { el: doc, isWindow: true };
-    }
-    // The document itself doesn't scroll - look for an inner container that
-    // does (common in app-shell layouts with a fixed header/sidebar and a
-    // separately-scrolling main content area, e.g. Canvas LMS).
-    let best = null;
-    let bestScore = 0;
-    for (const el of document.querySelectorAll('body *')) {
-      const style = getComputedStyle(el);
-      if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') continue;
-      const delta = el.scrollHeight - el.clientHeight;
-      if (delta < 20) continue;
-      if (el.clientHeight < window.innerHeight * 0.4) continue;
-      if (el.clientWidth < window.innerWidth * 0.3) continue;
-      if (delta > bestScore) {
-        bestScore = delta;
-        best = el;
-      }
-    }
-    return best ? { el: best, isWindow: false } : { el: doc, isWindow: true };
-  }
-
-  const { el, isWindow } = findScrollContainer();
-
-  // Fixed/sticky chrome (headers, sidebars) is pinned to the viewport, so a
-  // scroll-and-stitch capture would otherwise re-capture it in every tile.
-  // Hide it for the duration of the capture instead.
-  const hidden = [];
-  document.querySelectorAll('body *').forEach((node) => {
-    if (node === el || el.contains(node)) return;
-    const style = getComputedStyle(node);
-    if ((style.position === 'fixed' || style.position === 'sticky') && isVisible(node)) {
-      hidden.push([node, node.style.visibility]);
-      node.style.visibility = 'hidden';
-    }
+  // Un-clip every genuinely-overflowing scrollable box (rich-text answer
+  // editors, nested content panes, etc.) so its full content joins the
+  // normal document flow instead of staying hidden behind its own
+  // independent scrollbar. A single scroll-and-stitch pass only ever moves
+  // the document/window - anything clipped inside a smaller nested
+  // scroll container would otherwise never be revealed at all, which is
+  // what was cutting off longer answers.
+  const restoreOverflow = [];
+  document.querySelectorAll('body *').forEach((el) => {
+    if (el === document.documentElement || el === document.body) return;
+    const style = getComputedStyle(el);
+    const scrollable =
+      style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+      style.overflow === 'auto' || style.overflow === 'scroll';
+    if (!scrollable) return;
+    if (el.scrollHeight - el.clientHeight <= 2) return;
+    restoreOverflow.push([el, el.style.overflow, el.style.overflowY, el.style.maxHeight, el.style.height]);
+    el.style.setProperty('overflow', 'visible', 'important');
+    el.style.setProperty('max-height', 'none', 'important');
+    el.style.setProperty('height', 'auto', 'important');
   });
 
-  const originalScroll = isWindow ? window.scrollY : el.scrollTop;
-  window.__pagegrab = { el, isWindow, hidden, originalScroll };
+  // Now that nested boxes no longer clip anything, a single scroll of the
+  // document/window covers the whole page. Viewport-fixed/sticky chrome
+  // (headers, sidebars) would still get re-captured in every tile, so hide
+  // it for the duration of the capture.
+  const restoreFixed = [];
+  document.querySelectorAll('body *').forEach((el) => {
+    const style = getComputedStyle(el);
+    if (style.position !== 'fixed' && style.position !== 'sticky') return;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    restoreFixed.push([el, el.style.visibility]);
+    el.style.visibility = 'hidden';
+  });
 
-  // chrome.tabs.captureVisibleTab always screenshots the whole browser
-  // viewport, not just this container - so its on-screen rectangle is
-  // needed to crop each tile down to just the scrolling content later.
-  // Assumes the container's position doesn't change while scrolling it,
-  // which holds for the fixed-header/sidebar app-shell layouts this exists
-  // to handle.
-  const rect = isWindow
-    ? { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight }
-    : (() => {
-        const r = el.getBoundingClientRect();
-        return { top: r.top, left: r.left, width: r.width, height: r.height };
-      })();
+  const doc = document.scrollingElement || document.documentElement;
+  const originalScroll = window.scrollY;
+  window.__pagegrab = { restoreOverflow, restoreFixed, originalScroll };
 
   return {
-    totalHeight: el.scrollHeight,
-    rect,
+    totalHeight: doc.scrollHeight,
+    rect: { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight },
     devicePixelRatio: window.devicePixelRatio || 1,
   };
 }
 
 function pagegrabScrollTo(y) {
-  const state = window.__pagegrab;
-  if (!state) return;
-  if (state.isWindow) window.scrollTo(0, y);
-  else state.el.scrollTop = y;
+  window.scrollTo(0, y);
 }
 
 function pagegrabRestore() {
   const state = window.__pagegrab;
   if (!state) return;
-  state.hidden.forEach(([node, orig]) => {
-    node.style.visibility = orig;
+  state.restoreOverflow.forEach(([el, overflow, overflowY, maxHeight, height]) => {
+    el.style.overflow = overflow;
+    el.style.overflowY = overflowY;
+    el.style.maxHeight = maxHeight;
+    el.style.height = height;
   });
-  if (state.isWindow) window.scrollTo(0, state.originalScroll);
-  else state.el.scrollTop = state.originalScroll;
+  state.restoreFixed.forEach(([el, vis]) => {
+    el.style.visibility = vis;
+  });
+  window.scrollTo(0, state.originalScroll);
   delete window.__pagegrab;
 }
 

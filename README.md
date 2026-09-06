@@ -6,14 +6,24 @@ account.
 
 ## How it works
 
-It scrolls the page's content in increments, screenshots each visible frame
-(`chrome.tabs.captureVisibleTab`), and stitches the tiles into one image on
-an offscreen canvas. Before scrolling, it hides any `position: fixed` /
-`sticky` elements (headers, sidebars) so they don't get re-captured in every
-tile, and it scrolls whichever element actually has the scrollable content —
-either the page itself, or an inner container, for apps (like Canvas LMS)
-that put a fixed header/sidebar around a separately-scrolling content area.
-See `extension/background.js`.
+1. **Un-clips nested scroll boxes.** Rich-text editors, comment boxes, and
+   other small independently-scrolling elements get their height/overflow
+   constraints temporarily removed so their full content joins the normal
+   page flow — otherwise anything clipped inside one (e.g. a long typed
+   answer in a bounded-height text box) would never be captured at all.
+2. **Hides fixed/sticky chrome** (headers, sidebars) for the duration of
+   the capture, so they don't get re-captured in every tile.
+3. **Scrolls the page in increments**, screenshotting each visible frame
+   (`chrome.tabs.captureVisibleTab`) and stitching the tiles into one image
+   on an offscreen canvas.
+4. **Restores everything** back to how it was.
+
+See `extension/background.js`. Because step 3 has to actually move your
+visible scroll position (there's no way to screenshot what isn't on
+screen), you'll see the page scroll during a capture — that's expected, not
+a bug, and it's the safer trade-off: the alternative (loading the page fresh
+in a hidden tab instead) risks capturing a different state than what's
+actually on your screen, e.g. missing an in-progress, unsaved answer.
 
 ## Install
 
