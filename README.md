@@ -6,12 +6,14 @@ account.
 
 ## How it works
 
-It uses `chrome.debugger` to attach the Chrome DevTools Protocol directly to
-your active tab, reads the page's true content size
-(`Page.getLayoutMetrics`), and calls `Page.captureScreenshot` with
-`captureBeyondViewport: true` clipped to that full size — the same technique
-Puppeteer uses for `page.screenshot({ fullPage: true })`, just run locally
-against your own tab instead of a remote browser. See `extension/background.js`.
+It scrolls the page's content in increments, screenshots each visible frame
+(`chrome.tabs.captureVisibleTab`), and stitches the tiles into one image on
+an offscreen canvas. Before scrolling, it hides any `position: fixed` /
+`sticky` elements (headers, sidebars) so they don't get re-captured in every
+tile, and it scrolls whichever element actually has the scrollable content —
+either the page itself, or an inner container, for apps (like Canvas LMS)
+that put a fixed header/sidebar around a separately-scrolling content area.
+See `extension/background.js`.
 
 ## Install
 
@@ -40,12 +42,9 @@ it's hidden).
 If it shows `ERR`, open `chrome://extensions` → PageGrab → **service
 worker** to see the console error.
 
-## Note on the debugger banner
-
-Chrome shows a "PageGrab is debugging this browser" banner while
-`chrome.debugger` is attached — this is a mandatory, non-optional Chrome
-security indicator for any extension using that API, not a bug. It appears
-only for the ~1 second a capture takes.
+Longer pages take a bit longer than a single instant capture, since it's
+now one screenshot per screen-height rather than one shot of the whole
+page — a page 5 screens tall takes a few seconds, not a fraction of one.
 
 ## Publishing (optional)
 

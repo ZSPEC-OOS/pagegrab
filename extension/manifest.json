@@ -3,7 +3,7 @@
   "name": "PageGrab",
   "version": "1.0.0",
   "description": "Capture the entire scrolled page of the current tab as a PNG, in one click.",
-  "permissions": ["debugger", "downloads", "activeTab"],
+  "permissions": ["downloads", "activeTab", "scripting", "offscreen"],
   "action": {
     "default_title": "Capture full page as PNG",
     "default_icon": {
