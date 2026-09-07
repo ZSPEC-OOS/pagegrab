@@ -2,14 +2,65 @@
 // background.js variables) since chrome.scripting.executeScript serializes
 // these and re-runs them inside the target page. ---
 
-function pagegrabPrepare() {
-  // Un-clip every genuinely-overflowing scrollable box (rich-text answer
-  // editors, nested content panes, etc.) so its full content joins the
-  // normal document flow instead of staying hidden behind its own
-  // independent scrollbar. A single scroll-and-stitch pass only ever moves
-  // the document/window - anything clipped inside a smaller nested
-  // scroll container would otherwise never be revealed at all, which is
-  // what was cutting off longer answers.
+function pagegrabPrepare(mode) {
+  // Viewport-fixed/sticky chrome (headers, sidebars) would get re-captured
+  // in every tile regardless of mode, so hide it for the duration of the
+  // capture either way.
+  const restoreFixed = [];
+  document.querySelectorAll('body *').forEach((el) => {
+    const style = getComputedStyle(el);
+    if (style.position !== 'fixed' && style.position !== 'sticky') return;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    restoreFixed.push([el, el.style.visibility]);
+    el.style.visibility = 'hidden';
+  });
+
+  if (mode === 'inner') {
+    // Find the scrollable descendant hiding the most content - the
+    // dominant nested pane (chat log, editor, answer box) rather than the
+    // whole document. Slivers (scroll-hinting widgets a few px tall) are
+    // excluded via the minimum size check.
+    let target = null;
+    let maxOverflow = 0;
+    document.querySelectorAll('body *').forEach((el) => {
+      if (el === document.documentElement || el === document.body) return;
+      const style = getComputedStyle(el);
+      const scrollable =
+        style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+        style.overflow === 'auto' || style.overflow === 'scroll';
+      if (!scrollable) return;
+      if (el.clientHeight < 40 || el.clientWidth < 40) return;
+      const overflowAmount = el.scrollHeight - el.clientHeight;
+      if (overflowAmount <= 2) return;
+      if (overflowAmount > maxOverflow) {
+        maxOverflow = overflowAmount;
+        target = el;
+      }
+    });
+
+    if (!target) {
+      restoreFixed.forEach(([el, vis]) => { el.style.visibility = vis; });
+      return { error: 'no-inner-scroll' };
+    }
+
+    const r = target.getBoundingClientRect();
+    window.__pagegrab = { mode: 'inner', target, restoreFixed, originalScroll: target.scrollTop };
+
+    return {
+      totalHeight: target.scrollHeight,
+      rect: { top: r.top, left: r.left, width: r.width, height: r.height },
+      devicePixelRatio: window.devicePixelRatio || 1,
+    };
+  }
+
+  // mode 'page' (default): un-clip every genuinely-overflowing scrollable
+  // box (rich-text answer editors, nested content panes, etc.) so its full
+  // content joins the normal document flow instead of staying hidden
+  // behind its own independent scrollbar. A single scroll-and-stitch pass
+  // only ever moves the document/window - anything clipped inside a
+  // smaller nested scroll container would otherwise never be revealed at
+  // all, which is what was cutting off longer answers.
   const restoreOverflow = [];
   document.querySelectorAll('body *').forEach((el) => {
     if (el === document.documentElement || el === document.body) return;
@@ -25,23 +76,8 @@ function pagegrabPrepare() {
     el.style.setProperty('height', 'auto', 'important');
   });
 
-  // Now that nested boxes no longer clip anything, a single scroll of the
-  // document/window covers the whole page. Viewport-fixed/sticky chrome
-  // (headers, sidebars) would still get re-captured in every tile, so hide
-  // it for the duration of the capture.
-  const restoreFixed = [];
-  document.querySelectorAll('body *').forEach((el) => {
-    const style = getComputedStyle(el);
-    if (style.position !== 'fixed' && style.position !== 'sticky') return;
-    const r = el.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) return;
-    restoreFixed.push([el, el.style.visibility]);
-    el.style.visibility = 'hidden';
-  });
-
   const doc = document.scrollingElement || document.documentElement;
-  const originalScroll = window.scrollY;
-  window.__pagegrab = { restoreOverflow, restoreFixed, originalScroll };
+  window.__pagegrab = { mode: 'page', restoreOverflow, restoreFixed, originalScroll: window.scrollY };
 
   return {
     totalHeight: doc.scrollHeight,
@@ -51,22 +87,33 @@ function pagegrabPrepare() {
 }
 
 function pagegrabScrollTo(y) {
-  window.scrollTo(0, y);
+  const state = window.__pagegrab;
+  if (state && state.mode === 'inner') {
+    state.target.scrollTop = y;
+  } else {
+    window.scrollTo(0, y);
+  }
 }
 
 function pagegrabRestore() {
   const state = window.__pagegrab;
   if (!state) return;
-  state.restoreOverflow.forEach(([el, overflow, overflowY, maxHeight, height]) => {
-    el.style.overflow = overflow;
-    el.style.overflowY = overflowY;
-    el.style.maxHeight = maxHeight;
-    el.style.height = height;
-  });
+  if (state.restoreOverflow) {
+    state.restoreOverflow.forEach(([el, overflow, overflowY, maxHeight, height]) => {
+      el.style.overflow = overflow;
+      el.style.overflowY = overflowY;
+      el.style.maxHeight = maxHeight;
+      el.style.height = height;
+    });
+  }
   state.restoreFixed.forEach(([el, vis]) => {
     el.style.visibility = vis;
   });
-  window.scrollTo(0, state.originalScroll);
+  if (state.mode === 'inner') {
+    state.target.scrollTop = state.originalScroll;
+  } else {
+    window.scrollTo(0, state.originalScroll);
+  }
   delete window.__pagegrab;
 }
 
@@ -111,8 +158,11 @@ async function stitchTiles(shots, { totalHeight, rect, devicePixelRatio }) {
   return response.dataUrl;
 }
 
-async function captureFullPage(tab) {
-  const metrics = await execInTab(tab.id, pagegrabPrepare);
+async function captureFullPage(tab, mode = 'page') {
+  const metrics = await execInTab(tab.id, pagegrabPrepare, [mode]);
+  if (metrics?.error === 'no-inner-scroll') {
+    throw new Error('No inner scrollable element found on this page.');
+  }
   const { totalHeight, rect, devicePixelRatio } = metrics;
   const viewportHeight = rect.height;
 
@@ -146,7 +196,7 @@ function flashBadge(tabId, text, color) {
   setTimeout(() => chrome.action.setBadgeText({ tabId, text: '' }), 2000);
 }
 
-async function handleCapture(tab) {
+async function handleCapture(tab, mode = 'page') {
   if (!tab.id || !isCapturableUrl(tab.url)) {
     flashBadge(tab.id, '!', '#d32f2f');
     return;
@@ -156,10 +206,10 @@ async function handleCapture(tab) {
   chrome.action.setBadgeBackgroundColor({ tabId: tab.id, color: '#3b82f6' });
 
   try {
-    const dataUrl = await captureFullPage(tab);
+    const dataUrl = await captureFullPage(tab, mode);
     await chrome.downloads.download({
       url: dataUrl,
-      filename: `pagegrab-${Date.now()}.png`,
+      filename: `pagegrab${mode === 'inner' ? '-inner' : ''}-${Date.now()}.png`,
       saveAs: false,
     });
     flashBadge(tab.id, '✓', '#22c55e');
@@ -169,7 +219,17 @@ async function handleCapture(tab) {
   }
 }
 
-chrome.action.onClicked.addListener(handleCapture);
+// Popup's mode switch drives capture (the toolbar action opens the popup
+// instead of firing chrome.action.onClicked directly).
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.target !== 'pagegrab-popup' || msg?.type !== 'capture') return false;
+  (async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    await handleCapture(tab, msg.mode);
+    sendResponse({ ok: true });
+  })();
+  return true;
+});
 
 // Exposed for testing: drives the exact same capture path without
 // simulating a real toolbar click.
