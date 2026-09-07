@@ -17,27 +17,38 @@ function pagegrabPrepare(mode) {
   });
 
   if (mode === 'inner') {
-    // Find the scrollable descendant hiding the most content - the
-    // dominant nested pane (chat log, editor, answer box) rather than the
-    // whole document. Slivers (scroll-hinting widgets a few px tall) are
-    // excluded via the minimum size check.
-    let target = null;
-    let maxOverflow = 0;
-    document.querySelectorAll('body *').forEach((el) => {
-      if (el === document.documentElement || el === document.body) return;
-      const style = getComputedStyle(el);
-      const scrollable =
-        style.overflowY === 'auto' || style.overflowY === 'scroll' ||
-        style.overflow === 'auto' || style.overflow === 'scroll';
-      if (!scrollable) return;
-      if (el.clientHeight < 40 || el.clientWidth < 40) return;
-      const overflowAmount = el.scrollHeight - el.clientHeight;
-      if (overflowAmount <= 2) return;
-      if (overflowAmount > maxOverflow) {
-        maxOverflow = overflowAmount;
-        target = el;
-      }
-    });
+    // Prefer an element the user explicitly picked (see pagegrabPickerStart)
+    // over guessing - pages with several scrollable panes are ambiguous for
+    // a "largest overflow" heuristic alone. Fall back to that heuristic
+    // when nothing was picked, or the pick no longer applies (removed from
+    // the DOM, no longer overflowing).
+    let target = window.__pagegrabPickedElement;
+    if (target && (!target.isConnected || target.scrollHeight - target.clientHeight <= 2)) {
+      target = null;
+    }
+
+    if (!target) {
+      // Find the scrollable descendant hiding the most content - the
+      // dominant nested pane (chat log, editor, answer box) rather than the
+      // whole document. Slivers (scroll-hinting widgets a few px tall) are
+      // excluded via the minimum size check.
+      let maxOverflow = 0;
+      document.querySelectorAll('body *').forEach((el) => {
+        if (el === document.documentElement || el === document.body) return;
+        const style = getComputedStyle(el);
+        const scrollable =
+          style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+          style.overflow === 'auto' || style.overflow === 'scroll';
+        if (!scrollable) return;
+        if (el.clientHeight < 40 || el.clientWidth < 40) return;
+        const overflowAmount = el.scrollHeight - el.clientHeight;
+        if (overflowAmount <= 2) return;
+        if (overflowAmount > maxOverflow) {
+          maxOverflow = overflowAmount;
+          target = el;
+        }
+      });
+    }
 
     if (!target) {
       restoreFixed.forEach(([el, vis]) => { el.style.visibility = vis; });
@@ -115,6 +126,112 @@ function pagegrabRestore() {
     window.scrollTo(0, state.originalScroll);
   }
   delete window.__pagegrab;
+}
+
+function pagegrabCheckPick() {
+  const el = window.__pagegrabPickedElement;
+  if (!el || !el.isConnected) return null;
+  if (el.scrollHeight - el.clientHeight <= 2) return null;
+  return {
+    tag: el.tagName.toLowerCase(),
+    cls: (el.className || '').toString().trim().split(/\s+/)[0] || '',
+    w: el.clientWidth,
+    h: el.clientHeight,
+  };
+}
+
+function pagegrabClearPick() {
+  delete window.__pagegrabPickedElement;
+}
+
+// Interactive picker: hover highlights the nearest scrollable ancestor
+// under the cursor, click confirms it as the inner-scroll capture target.
+// Needed because "largest overflow" is ambiguous on pages with several
+// independently-scrolling panes - the user points at the one that matters.
+function pagegrabPickerStart() {
+  if (window.__pagegrabPicking) window.__pagegrabPicking.cleanup();
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText =
+    'position:fixed;pointer-events:none;z-index:2147483647;border:2px solid #3b82f6;' +
+    'background:rgba(59,130,246,0.15);display:none;box-sizing:border-box;';
+  document.documentElement.appendChild(overlay);
+
+  const banner = document.createElement('div');
+  banner.textContent = 'PageGrab: click a scroll area to capture (Esc to cancel)';
+  banner.style.cssText =
+    'position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:2147483647;' +
+    'background:#111827;color:#fff;padding:6px 12px;border-radius:6px;' +
+    'font:12px system-ui,sans-serif;box-shadow:0 2px 8px rgba(0,0,0,0.3);pointer-events:none;';
+  document.documentElement.appendChild(banner);
+
+  function findScrollable(node) {
+    let el = node;
+    while (el && el !== document.documentElement && el !== document.body) {
+      const style = getComputedStyle(el);
+      const scrollable =
+        style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+        style.overflow === 'auto' || style.overflow === 'scroll';
+      if (scrollable && el.clientHeight >= 40 && el.clientWidth >= 40 && el.scrollHeight - el.clientHeight > 2) {
+        return el;
+      }
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function onMove(e) {
+    const el = findScrollable(e.target);
+    if (!el) { overlay.style.display = 'none'; return; }
+    const r = el.getBoundingClientRect();
+    overlay.style.display = 'block';
+    overlay.style.top = `${r.top}px`;
+    overlay.style.left = `${r.left}px`;
+    overlay.style.width = `${r.width}px`;
+    overlay.style.height = `${r.height}px`;
+  }
+
+  function cleanup() {
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('keydown', onKey, true);
+    overlay.remove();
+    banner.remove();
+    delete window.__pagegrabPicking;
+  }
+
+  function onClick(e) {
+    const el = findScrollable(e.target);
+    if (!el) return; // not over a valid target - let the click through, keep picking
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    window.__pagegrabPickedElement = el;
+    overlay.style.borderColor = '#22c55e';
+    overlay.style.background = 'rgba(34,197,94,0.25)';
+    chrome.runtime.sendMessage({
+      target: 'pagegrab-picker',
+      type: 'picked',
+      info: {
+        tag: el.tagName.toLowerCase(),
+        cls: (el.className || '').toString().trim().split(/\s+/)[0] || '',
+        w: el.clientWidth,
+        h: el.clientHeight,
+      },
+    });
+    setTimeout(cleanup, 300);
+  }
+
+  function onKey(e) {
+    if (e.key !== 'Escape') return;
+    cleanup();
+    chrome.runtime.sendMessage({ target: 'pagegrab-picker', type: 'cancelled' });
+  }
+
+  document.addEventListener('mousemove', onMove, true);
+  document.addEventListener('click', onClick, true);
+  document.addEventListener('keydown', onKey, true);
+  window.__pagegrabPicking = { cleanup };
 }
 
 // --- Background service worker logic. ---
@@ -219,16 +336,41 @@ async function handleCapture(tab, mode = 'page') {
   }
 }
 
-// Popup's mode switch drives capture (the toolbar action opens the popup
-// instead of firing chrome.action.onClicked directly).
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.target !== 'pagegrab-popup' || msg?.type !== 'capture') return false;
-  (async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    await handleCapture(tab, msg.mode);
-    sendResponse({ ok: true });
-  })();
-  return true;
+// Popup's mode switch and picker drive capture (the toolbar action opens
+// the popup instead of firing chrome.action.onClicked directly).
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.target === 'pagegrab-popup') {
+    (async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      switch (msg.type) {
+        case 'capture':
+          await handleCapture(tab, msg.mode);
+          sendResponse({ ok: true });
+          break;
+        case 'pick-start':
+          await execInTab(tab.id, pagegrabPickerStart);
+          sendResponse({ ok: true });
+          break;
+        case 'pick-status':
+          sendResponse({ ok: true, info: await execInTab(tab.id, pagegrabCheckPick) });
+          break;
+        case 'pick-clear':
+          await execInTab(tab.id, pagegrabClearPick);
+          sendResponse({ ok: true });
+          break;
+        default:
+          sendResponse({ ok: false, error: `Unknown message type: ${msg.type}` });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.target === 'pagegrab-picker' && msg.type === 'picked' && sender.tab?.id) {
+    flashBadge(sender.tab.id, '✓', '#22c55e');
+    return false;
+  }
+
+  return false;
 });
 
 // Exposed for testing: drives the exact same capture path without
