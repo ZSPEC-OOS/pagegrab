@@ -2,76 +2,14 @@
 // background.js variables) since chrome.scripting.executeScript serializes
 // these and re-runs them inside the target page. ---
 
-function pagegrabPrepare(mode) {
-  // Viewport-fixed/sticky chrome (headers, sidebars) would get re-captured
-  // in every tile regardless of mode, so hide it for the duration of the
-  // capture either way.
-  const restoreFixed = [];
-  document.querySelectorAll('body *').forEach((el) => {
-    const style = getComputedStyle(el);
-    if (style.position !== 'fixed' && style.position !== 'sticky') return;
-    const r = el.getBoundingClientRect();
-    if (r.width === 0 || r.height === 0) return;
-    restoreFixed.push([el, el.style.visibility]);
-    el.style.visibility = 'hidden';
-  });
-
-  if (mode === 'inner') {
-    // Prefer an element the user explicitly picked (see pagegrabPickerStart)
-    // over guessing - pages with several scrollable panes are ambiguous for
-    // a "largest overflow" heuristic alone. Fall back to that heuristic
-    // when nothing was picked, or the pick no longer applies (removed from
-    // the DOM, no longer overflowing).
-    let target = window.__pagegrabPickedElement;
-    if (target && (!target.isConnected || target.scrollHeight - target.clientHeight <= 2)) {
-      target = null;
-    }
-
-    if (!target) {
-      // Find the scrollable descendant hiding the most content - the
-      // dominant nested pane (chat log, editor, answer box) rather than the
-      // whole document. Slivers (scroll-hinting widgets a few px tall) are
-      // excluded via the minimum size check.
-      let maxOverflow = 0;
-      document.querySelectorAll('body *').forEach((el) => {
-        if (el === document.documentElement || el === document.body) return;
-        const style = getComputedStyle(el);
-        const scrollable =
-          style.overflowY === 'auto' || style.overflowY === 'scroll' ||
-          style.overflow === 'auto' || style.overflow === 'scroll';
-        if (!scrollable) return;
-        if (el.clientHeight < 40 || el.clientWidth < 40) return;
-        const overflowAmount = el.scrollHeight - el.clientHeight;
-        if (overflowAmount <= 2) return;
-        if (overflowAmount > maxOverflow) {
-          maxOverflow = overflowAmount;
-          target = el;
-        }
-      });
-    }
-
-    if (!target) {
-      restoreFixed.forEach(([el, vis]) => { el.style.visibility = vis; });
-      return { error: 'no-inner-scroll' };
-    }
-
-    const r = target.getBoundingClientRect();
-    window.__pagegrab = { mode: 'inner', target, restoreFixed, originalScroll: target.scrollTop };
-
-    return {
-      totalHeight: target.scrollHeight,
-      rect: { top: r.top, left: r.left, width: r.width, height: r.height },
-      devicePixelRatio: window.devicePixelRatio || 1,
-    };
-  }
-
-  // mode 'page' (default): un-clip every genuinely-overflowing scrollable
-  // box (rich-text answer editors, nested content panes, etc.) so its full
-  // content joins the normal document flow instead of staying hidden
-  // behind its own independent scrollbar. A single scroll-and-stitch pass
-  // only ever moves the document/window - anything clipped inside a
-  // smaller nested scroll container would otherwise never be revealed at
-  // all, which is what was cutting off longer answers.
+function pagegrabPrepare() {
+  // Un-clip every genuinely-overflowing scrollable box (rich-text answer
+  // editors, nested content panes, etc.) so its full content joins the
+  // normal document flow instead of staying hidden behind its own
+  // independent scrollbar. A single scroll-and-stitch pass only ever moves
+  // the document/window - anything clipped inside a smaller nested
+  // scroll container would otherwise never be revealed at all, which is
+  // what was cutting off longer answers.
   const restoreOverflow = [];
   document.querySelectorAll('body *').forEach((el) => {
     if (el === document.documentElement || el === document.body) return;
@@ -85,6 +23,20 @@ function pagegrabPrepare(mode) {
     el.style.setProperty('overflow', 'visible', 'important');
     el.style.setProperty('max-height', 'none', 'important');
     el.style.setProperty('height', 'auto', 'important');
+  });
+
+  // Now that nested boxes no longer clip anything, a single scroll of the
+  // document/window covers the whole page. Viewport-fixed/sticky chrome
+  // (headers, sidebars) would still get re-captured in every tile, so hide
+  // it for the duration of the capture.
+  const restoreFixed = [];
+  document.querySelectorAll('body *').forEach((el) => {
+    const style = getComputedStyle(el);
+    if (style.position !== 'fixed' && style.position !== 'sticky') return;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    restoreFixed.push([el, el.style.visibility]);
+    el.style.visibility = 'hidden';
   });
 
   const doc = document.scrollingElement || document.documentElement;
@@ -144,10 +96,102 @@ function pagegrabClearPick() {
   delete window.__pagegrabPickedElement;
 }
 
+// Auto-detect, scoped to a single frame: find the scrollable descendant
+// hiding the most content in *this* document. Runs in every frame (see
+// execAllFrames) since a page's real scroll pane is often inside an
+// <iframe> - e.g. Canvas SpeedGrader's submission preview - and a
+// same-frame-only scan would never see it. Caches the winning element on
+// window so a later call in the same frame can reuse the exact same node.
+function pagegrabScanScrollable() {
+  let target = null;
+  let maxOverflow = 0;
+  document.querySelectorAll('body *').forEach((el) => {
+    if (el === document.documentElement || el === document.body) return;
+    const style = getComputedStyle(el);
+    const scrollable =
+      style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+      style.overflow === 'auto' || style.overflow === 'scroll';
+    if (!scrollable) return;
+    if (el.clientHeight < 40 || el.clientWidth < 40) return;
+    const overflowAmount = el.scrollHeight - el.clientHeight;
+    if (overflowAmount <= 2) return;
+    if (overflowAmount > maxOverflow) {
+      maxOverflow = overflowAmount;
+      target = el;
+    }
+  });
+  if (!target) return null;
+  window.__pagegrabAutoTarget = target;
+  return { overflowAmount: maxOverflow };
+}
+
+// Prepares the inner-scroll capture target *within whichever frame this
+// runs in* - either the element the user explicitly picked, or the one
+// pagegrabScanScrollable already cached in this frame. Translates the
+// target's rect into top-page viewport coordinates by walking up through
+// any enclosing <iframe> elements (same-origin only), since
+// chrome.tabs.captureVisibleTab always shoots the whole composited tab and
+// the crop math in offscreen.js expects top-page coordinates regardless of
+// which frame the content actually lives in.
+function pagegrabPrepareInnerTarget(usePicked) {
+  const restoreFixed = [];
+  document.querySelectorAll('body *').forEach((el) => {
+    const style = getComputedStyle(el);
+    if (style.position !== 'fixed' && style.position !== 'sticky') return;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    restoreFixed.push([el, el.style.visibility]);
+    el.style.visibility = 'hidden';
+  });
+
+  let target = usePicked ? window.__pagegrabPickedElement : window.__pagegrabAutoTarget;
+  if (target && (!target.isConnected || target.scrollHeight - target.clientHeight <= 2)) {
+    target = null;
+  }
+
+  if (!target) {
+    restoreFixed.forEach(([el, vis]) => { el.style.visibility = vis; });
+    return { error: 'no-inner-scroll' };
+  }
+
+  const r = target.getBoundingClientRect();
+  let left = r.left;
+  let top = r.top;
+  let win = window;
+  while (win !== win.top) {
+    let frameEl;
+    try {
+      frameEl = win.frameElement;
+    } catch (e) {
+      break; // cross-origin ancestor - can't determine its offset
+    }
+    if (!frameEl) break;
+    const fr = frameEl.getBoundingClientRect();
+    left += fr.left;
+    top += fr.top;
+    win = win.parent;
+  }
+
+  window.__pagegrab = { mode: 'inner', target, restoreFixed, originalScroll: target.scrollTop };
+
+  return {
+    totalHeight: target.scrollHeight,
+    rect: { top, left, width: r.width, height: r.height },
+    devicePixelRatio: window.devicePixelRatio || 1,
+  };
+}
+
+function pagegrabPickerCleanup() {
+  if (window.__pagegrabPicking) window.__pagegrabPicking.cleanup();
+}
+
 // Interactive picker: hover highlights the nearest scrollable ancestor
 // under the cursor, click confirms it as the inner-scroll capture target.
 // Needed because "largest overflow" is ambiguous on pages with several
 // independently-scrolling panes - the user points at the one that matters.
+// Injected into every frame (see execAllFrames) so it also works inside
+// same-origin iframes, whose own document never sees events dispatched to
+// an ancestor frame's listeners.
 function pagegrabPickerStart() {
   if (window.__pagegrabPicking) window.__pagegrabPicking.cleanup();
 
@@ -236,9 +280,48 @@ function pagegrabPickerStart() {
 
 // --- Background service worker logic. ---
 
-async function execInTab(tabId, func, args = []) {
-  const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func, args });
+async function execInTab(tabId, func, args = [], frameId = 0) {
+  const [{ result }] = await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, func, args });
   return result;
+}
+
+// Runs func in every frame of the tab (top + same-origin iframes) and
+// returns the raw per-frame results, so the caller can compare candidates
+// across frames (e.g. "which frame has the biggest scrollable pane").
+// Frames the extension can't access (cross-origin) are simply absent from
+// the result rather than failing the whole call.
+async function execAllFrames(tabId, func, args = []) {
+  try {
+    return await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func, args });
+  } catch (e) {
+    return [];
+  }
+}
+
+// Which frame (if any) holds the user's picked inner-scroll target, per
+// tab. Kept in chrome.storage.session rather than an in-memory variable
+// because the MV3 service worker can be evicted between the user picking
+// an element and later clicking Capture - the picked DOM element itself
+// survives fine on the page, but we'd otherwise forget which frame it's in.
+const PICKED_FRAMES_KEY = 'pagegrabPickedFrames';
+
+async function getPickedFrame(tabId) {
+  const stored = await chrome.storage.session.get(PICKED_FRAMES_KEY);
+  return stored[PICKED_FRAMES_KEY]?.[tabId];
+}
+
+async function setPickedFrame(tabId, frameId) {
+  const stored = await chrome.storage.session.get(PICKED_FRAMES_KEY);
+  const all = stored[PICKED_FRAMES_KEY] || {};
+  all[tabId] = frameId;
+  await chrome.storage.session.set({ [PICKED_FRAMES_KEY]: all });
+}
+
+async function clearPickedFrame(tabId) {
+  const stored = await chrome.storage.session.get(PICKED_FRAMES_KEY);
+  const all = stored[PICKED_FRAMES_KEY] || {};
+  delete all[tabId];
+  await chrome.storage.session.set({ [PICKED_FRAMES_KEY]: all });
 }
 
 async function captureVisibleTabWithRetry(windowId) {
@@ -275,11 +358,49 @@ async function stitchTiles(shots, { totalHeight, rect, devicePixelRatio }) {
   return response.dataUrl;
 }
 
-async function captureFullPage(tab, mode = 'page') {
-  const metrics = await execInTab(tab.id, pagegrabPrepare, [mode]);
-  if (metrics?.error === 'no-inner-scroll') {
-    throw new Error('No inner scrollable element found on this page.');
+// Resolves which frame holds the inner-scroll target and prepares it
+// there: the user's pick if one exists and still applies, otherwise the
+// best auto-detected candidate across every frame in the tab.
+async function resolveInnerTarget(tab) {
+  const pinnedFrame = await getPickedFrame(tab.id);
+  if (pinnedFrame !== undefined) {
+    try {
+      const metrics = await execInTab(tab.id, pagegrabPrepareInnerTarget, [true], pinnedFrame);
+      if (!metrics?.error) return { frameId: pinnedFrame, metrics };
+    } catch (e) {
+      // frame likely gone (navigation, closed iframe) - fall through to auto-detect
+    }
+    await clearPickedFrame(tab.id);
   }
+
+  const scanResults = await execAllFrames(tab.id, pagegrabScanScrollable);
+  let bestFrameId = null;
+  let bestOverflow = 0;
+  for (const entry of scanResults) {
+    if (entry?.result?.overflowAmount > bestOverflow) {
+      bestOverflow = entry.result.overflowAmount;
+      bestFrameId = entry.frameId;
+    }
+  }
+  if (bestFrameId === null) return null;
+
+  const metrics = await execInTab(tab.id, pagegrabPrepareInnerTarget, [false], bestFrameId);
+  if (metrics?.error) return null;
+  return { frameId: bestFrameId, metrics };
+}
+
+async function captureFullPage(tab, mode = 'page') {
+  let frameId = 0;
+  let metrics;
+
+  if (mode === 'inner') {
+    const resolved = await resolveInnerTarget(tab);
+    if (!resolved) throw new Error('No inner scrollable element found on this page.');
+    ({ frameId, metrics } = resolved);
+  } else {
+    metrics = await execInTab(tab.id, pagegrabPrepare);
+  }
+
   const { totalHeight, rect, devicePixelRatio } = metrics;
   const viewportHeight = rect.height;
 
@@ -289,7 +410,7 @@ async function captureFullPage(tab, mode = 'page') {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const targetY = Math.min(y, Math.max(0, totalHeight - viewportHeight));
-      await execInTab(tab.id, pagegrabScrollTo, [targetY]);
+      await execInTab(tab.id, pagegrabScrollTo, [targetY], frameId);
       await new Promise((r) => setTimeout(r, 250)); // let repaint/lazy content settle
       const dataUrl = await captureVisibleTabWithRetry(tab.windowId);
       shots.push({ y: targetY, dataUrl });
@@ -297,7 +418,7 @@ async function captureFullPage(tab, mode = 'page') {
       y += viewportHeight;
     }
   } finally {
-    await execInTab(tab.id, pagegrabRestore);
+    await execInTab(tab.id, pagegrabRestore, [], frameId);
   }
 
   return stitchTiles(shots, { totalHeight, rect, devicePixelRatio });
@@ -348,16 +469,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true });
           break;
         case 'pick-start':
-          await execInTab(tab.id, pagegrabPickerStart);
+          await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: pagegrabPickerStart });
           sendResponse({ ok: true });
           break;
-        case 'pick-status':
-          sendResponse({ ok: true, info: await execInTab(tab.id, pagegrabCheckPick) });
+        case 'pick-status': {
+          const frameId = await getPickedFrame(tab.id);
+          if (frameId === undefined) { sendResponse({ ok: true, info: null }); break; }
+          let info = null;
+          try {
+            info = await execInTab(tab.id, pagegrabCheckPick, [], frameId);
+          } catch (e) {
+            info = null;
+          }
+          if (!info) await clearPickedFrame(tab.id);
+          sendResponse({ ok: true, info });
           break;
-        case 'pick-clear':
-          await execInTab(tab.id, pagegrabClearPick);
+        }
+        case 'pick-clear': {
+          const frameId = await getPickedFrame(tab.id);
+          if (frameId !== undefined) {
+            try {
+              await execInTab(tab.id, pagegrabClearPick, [], frameId);
+            } catch (e) {
+              // frame may already be gone - nothing to clean up there
+            }
+            await clearPickedFrame(tab.id);
+          }
           sendResponse({ ok: true });
           break;
+        }
         default:
           sendResponse({ ok: false, error: `Unknown message type: ${msg.type}` });
       }
@@ -365,8 +505,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg?.target === 'pagegrab-picker' && msg.type === 'picked' && sender.tab?.id) {
-    flashBadge(sender.tab.id, '✓', '#22c55e');
+  if (msg?.target === 'pagegrab-picker' && sender.tab?.id) {
+    const tabId = sender.tab.id;
+    if (msg.type === 'picked') {
+      setPickedFrame(tabId, sender.frameId);
+      flashBadge(tabId, '✓', '#22c55e');
+    }
+    if (msg.type === 'picked' || msg.type === 'cancelled') {
+      // Stop any other frames still in picker mode (e.g. Esc pressed while
+      // focus was in a different frame than the one that started picking).
+      chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: pagegrabPickerCleanup }).catch(() => {});
+    }
     return false;
   }
 
