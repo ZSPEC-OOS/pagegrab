@@ -15,13 +15,18 @@ Clicking the toolbar icon opens a small popup with two capture modes:
      page flow — otherwise anything clipped inside one (e.g. a long typed
      answer in a bounded-height text box) would never be captured at all.
   2. Scrolls the whole document/window.
-- **Inner scroll area**: skips the un-clip step and instead auto-detects
-  the scrollable descendant with the most hidden content (the dominant
-  nested pane — a chat log, editor, or answer box) and scrolls *that
-  element* instead of the window. Use this when the content you care about
-  lives in a nested scroller that doesn't reflow cleanly when un-clipped
-  (virtualized lists, custom scroll widgets) — the result is a PNG of just
-  that panel, fully expanded.
+- **Inner scroll area**: skips the un-clip step and instead scrolls one
+  chosen scrollable descendant instead of the window. Use this when the
+  content you care about lives in a nested scroller that doesn't reflow
+  cleanly when un-clipped (virtualized lists, custom scroll widgets) — the
+  result is a PNG of just that panel, fully expanded.
+  - By default it auto-detects the scrollable element with the most hidden
+    content (the dominant nested pane). On a page with several scrollbars
+    this can pick the wrong one.
+  - Click **Pick element on page…** in the popup to choose explicitly: the
+    popup closes, hover over the page to see candidate scroll areas
+    outlined, and click one to select it (Esc cancels). The pick sticks
+    until you pick again, clear it, or reload the page.
 
 Both modes:
 1. **Hide fixed/sticky chrome** (headers, sidebars) for the duration of
