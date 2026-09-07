@@ -120,6 +120,20 @@ function pagegrabScanScrollable() {
       target = el;
     }
   });
+
+  // A nested frame's own document can scroll as a whole, with no wrapping
+  // overflow:auto div at all - e.g. Canvas SpeedGrader's submission iframe.
+  // The top frame's own document scroll is deliberately not offered here
+  // since 'page' mode already covers that case.
+  if (window !== window.top) {
+    const se = document.scrollingElement || document.documentElement;
+    const selfOverflow = se.scrollHeight - se.clientHeight;
+    if (selfOverflow > 2 && selfOverflow > maxOverflow) {
+      maxOverflow = selfOverflow;
+      target = se;
+    }
+  }
+
   if (!target) return null;
   window.__pagegrabAutoTarget = target;
   return { overflowAmount: maxOverflow };
@@ -154,7 +168,13 @@ function pagegrabPrepareInnerTarget(usePicked) {
     return { error: 'no-inner-scroll' };
   }
 
-  const r = target.getBoundingClientRect();
+  // A frame's own document/root as target (see pagegrabScanScrollable)
+  // needs its viewport rect, not getBoundingClientRect() - the root
+  // element's own box doesn't reliably report the full scrollable area.
+  const isFrameRoot = target === (document.scrollingElement || document.documentElement);
+  const r = isFrameRoot
+    ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+    : target.getBoundingClientRect();
   let left = r.left;
   let top = r.top;
   let win = window;
@@ -221,13 +241,26 @@ function pagegrabPickerStart() {
       }
       el = el.parentElement;
     }
+    // No nested overflow:auto/scroll box under the cursor - if this is a
+    // nested frame, its own document can be the scroll area itself, with
+    // no wrapper div at all (e.g. Canvas SpeedGrader's submission iframe).
+    // Not offered for the top frame since 'page' mode already covers that.
+    if (window !== window.top) {
+      const se = document.scrollingElement || document.documentElement;
+      if (se.scrollHeight - se.clientHeight > 2) return se;
+    }
     return null;
   }
 
   function onMove(e) {
     const el = findScrollable(e.target);
     if (!el) { overlay.style.display = 'none'; return; }
-    const r = el.getBoundingClientRect();
+    // documentElement's own getBoundingClientRect() can report the full
+    // scrollHeight rather than the viewport - use the viewport box instead
+    // so the highlight doesn't look absurdly tall.
+    const r = el === (document.scrollingElement || document.documentElement)
+      ? { top: 0, left: 0, width: window.innerWidth, height: window.innerHeight }
+      : el.getBoundingClientRect();
     overlay.style.display = 'block';
     overlay.style.top = `${r.top}px`;
     overlay.style.left = `${r.left}px`;
